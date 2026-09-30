@@ -46,7 +46,9 @@ sudo ./capture-rocky8.8-to-8.10-snapshot.sh
 
 低速回線向けに、タイムアウト、低速判定、再試行回数、並列ダウンロード数を調整しています。
 
-### 2. 更新対象を除外する
+### 2. 更新対象またはリポジトリを除外する
+
+#### パッケージを除外する
 
 DNF/YUM互換の次の指定方法を使用できます。
 
@@ -74,6 +76,33 @@ sudo ./capture-rocky8.8-to-8.10-snapshot.sh \
 - `kernel-core` または `rocky-release` の8.10版が取得できない除外指定は、8.10用スナップショットとして成立しないため失敗します。
 - 使用可能な引数は `./capture-rocky8.8-to-8.10-snapshot.sh --help` で確認できます。
 
+#### リポジトリを無効化する
+
+`--disablerepo REPOID` または `--disablerepo=REPOID` を使用します。複数指定、カンマ区切り、引用符で囲んだワイルドカード指定に対応しています。
+
+```bash
+sudo ./capture-rocky8.8-to-8.10-snapshot.sh \
+  --disablerepo rocky-8.10-snapshot-extras
+```
+
+パッケージ除外と組み合わせることもできます。
+
+```bash
+sudo ./capture-rocky8.8-to-8.10-snapshot.sh \
+  --exclude 'podman*' \
+  --disablerepo rocky-8.10-snapshot-extras
+```
+
+指定可能な一時リポジトリIDは次のとおりです。
+
+- `rocky-8.10-snapshot-baseos`
+- `rocky-8.10-snapshot-appstream`
+- `rocky-8.10-snapshot-extras`
+
+既存の `/etc/yum.repos.d` は最初から参照しないため、そこで定義されたリポジトリを指定する必要はありません。指定内容はスナップショット内の `state/requested-disabled-repositories.txt` に1行ずつ記録されます。
+
+BaseOSを無効化すると、8.10の `kernel-core` や `rocky-release` を取得できず、完全な8.10更新スナップショットとして成立しない可能性があります。その場合は安全のため取得処理が失敗します。
+
 ### 3. 生成物を確認する
 
 既定では次の2ファイルが生成されます。
@@ -85,7 +114,7 @@ sudo ./capture-rocky8.8-to-8.10-snapshot.sh \
 
 `.tar` と `.tar.sha256` は同じディレクトリで保管・転送してください。
 
-アーカイブには、RPM、RPM一覧、各RPMのSHA-256、取得前のパッケージ状態、対象バージョン情報、除外指定が含まれます。
+アーカイブには、RPM、RPM一覧、各RPMのSHA-256、取得前のパッケージ状態、対象バージョン情報、パッケージ除外指定、リポジトリ無効化指定が含まれます。
 
 ### 4. スナップショットを適用する
 
@@ -135,13 +164,28 @@ Rocky Linux 8.8のまま、8.8 Vaultに保存された最終更新までのRPM�
 sudo ./capture-rocky8.8-vault-snapshot.sh
 ```
 
-除外指定は8.10用取得スクリプトと同じです。
+パッケージ除外指定は8.10用取得スクリプトと同じです。
 
 ```bash
 sudo ./capture-rocky8.8-vault-snapshot.sh \
   --exclude 'podman*' \
   -x 'kernel-tools*'
 ```
+
+リポジトリを無効化する場合は、Vault用の一時リポジトリIDを指定します。
+
+```bash
+sudo ./capture-rocky8.8-vault-snapshot.sh \
+  --disablerepo rocky-8.8-vault-extras
+```
+
+指定可能な一時リポジトリIDは次のとおりです。
+
+- `rocky-8.8-vault-baseos`
+- `rocky-8.8-vault-appstream`
+- `rocky-8.8-vault-extras`
+
+指定内容はスナップショット内の `state/requested-disabled-repositories.txt` に記録されます。BaseOSや依存関係に必要なリポジトリを無効化すると、DNFの依存関係解決に失敗する場合があります。
 
 既定の生成物は次のとおりです。
 
@@ -164,5 +208,5 @@ sudo ./capture-rocky8.8-vault-snapshot.sh \
 
 ## 参考資料
 
-- [DNF Command Reference: --exclude / -x](https://dnf.readthedocs.io/en/latest/command_ref.html)
+- [DNF Command Reference: --exclude / -x / --disablerepo](https://dnf.readthedocs.io/en/latest/command_ref.html)
 - [Rocky Linux Wiki: Repositories](https://wiki.rockylinux.org/rocky/repo/)

@@ -11,18 +11,27 @@ usage()
 {
     cat <<'USAGE_EOF'
 使用方法:
-  sudo ./capture-rocky8.8-vault-snapshot.sh [--exclude PATTERN]...
+  sudo ./capture-rocky8.8-vault-snapshot.sh [OPTIONS]
 
 オプション:
-  -x, --exclude PATTERN    DNF/YUMの更新対象からPATTERNを除外する
-      --exclude=PATTERN    同上
-  -h, --help               このヘルプを表示する
+  -x, --exclude PATTERN     DNF/YUMの更新対象からPATTERNを除外する
+      --exclude=PATTERN     同上
+      --disablerepo REPOID  一時リポジトリからREPOIDを無効化する
+      --disablerepo=REPOID  同上
+  -h, --help                このヘルプを表示する
 
-複数指定できます。ワイルドカードは引用符で囲んでください。
+各オプションは複数指定できます。リポジトリIDはカンマ区切りにも対応します。
+ワイルドカードは引用符で囲んでください。
 例:
   sudo ./capture-rocky8.8-vault-snapshot.sh \
     --exclude 'podman*' \
-    --exclude='java-1.8.0-openjdk*'
+    --exclude='java-1.8.0-openjdk*' \
+    --disablerepo rocky-8.8-vault-extras
+
+一時リポジトリID:
+  rocky-8.8-vault-baseos
+  rocky-8.8-vault-appstream
+  rocky-8.8-vault-extras
 
 注意:
   このスクリプトは8.8 Vaultの最終状態を取得します。
@@ -31,6 +40,7 @@ USAGE_EOF
 }
 
 EXCLUDE_PATTERNS=()
+DISABLED_REPOSITORIES=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -49,6 +59,23 @@ while [[ $# -gt 0 ]]; do
                 exit 2
             fi
             EXCLUDE_PATTERNS+=("${exclude_pattern}")
+            shift
+            ;;
+        --disablerepo)
+            if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
+                echo "ERROR: --disablerepo には空でないリポジトリIDが必要です。" >&2
+                exit 2
+            fi
+            DISABLED_REPOSITORIES+=("$2")
+            shift 2
+            ;;
+        --disablerepo=*)
+            disabled_repository="${1#--disablerepo=}"
+            if [[ -z "${disabled_repository}" ]]; then
+                echo "ERROR: --disablerepo には空でないリポジトリIDが必要です。" >&2
+                exit 2
+            fi
+            DISABLED_REPOSITORIES+=("${disabled_repository}")
             shift
             ;;
         -h|--help)
@@ -70,12 +97,23 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-for exclude_pattern in "${EXCLUDE_PATTERNS[@]}"; do
-    if [[ "${exclude_pattern}" == *$'\n'* || "${exclude_pattern}" == *$'\r'* ]]; then
-        echo "ERROR: 除外パターンに改行は使用できません。" >&2
-        exit 2
-    fi
-done
+if [[ ${#EXCLUDE_PATTERNS[@]} -gt 0 ]]; then
+    for exclude_pattern in "${EXCLUDE_PATTERNS[@]}"; do
+        if [[ "${exclude_pattern}" == *$'\n'* || "${exclude_pattern}" == *$'\r'* ]]; then
+            echo "ERROR: 除外パターンに改行は使用できません。" >&2
+            exit 2
+        fi
+    done
+fi
+
+if [[ ${#DISABLED_REPOSITORIES[@]} -gt 0 ]]; then
+    for disabled_repository in "${DISABLED_REPOSITORIES[@]}"; do
+        if [[ "${disabled_repository}" == *$'\n'* || "${disabled_repository}" == *$'\r'* ]]; then
+            echo "ERROR: リポジトリIDに改行は使用できません。" >&2
+            exit 2
+        fi
+    done
+fi
 
 if [[ "${EUID}" -ne 0 ]]; then
     echo "ERROR: rootで実行してください。"
@@ -148,6 +186,13 @@ else
     : > "${WORK_DIR}/state/requested-excludes.txt"
 fi
 
+if [[ ${#DISABLED_REPOSITORIES[@]} -gt 0 ]]; then
+    printf '%s\n' "${DISABLED_REPOSITORIES[@]}" \
+        > "${WORK_DIR}/state/requested-disabled-repositories.txt"
+else
+    : > "${WORK_DIR}/state/requested-disabled-repositories.txt"
+fi
+
 cat > "${REPO_DIR}/Rocky-8.8-Vault.repo" <<REPO_EOF
 [rocky-8.8-vault-baseos]
 name=Rocky Linux 8.8 - Vault - BaseOS
@@ -194,10 +239,18 @@ DNF_REPO_ARGS=(
     "--enablerepo=rocky-8.8-vault-extras"
 )
 
+if [[ ${#DISABLED_REPOSITORIES[@]} -gt 0 ]]; then
+    for disabled_repository in "${DISABLED_REPOSITORIES[@]}"; do
+        DNF_REPO_ARGS+=("--disablerepo=${disabled_repository}")
+    done
+fi
+
 DNF_EXCLUDE_ARGS=()
-for exclude_pattern in "${EXCLUDE_PATTERNS[@]}"; do
-    DNF_EXCLUDE_ARGS+=("--exclude=${exclude_pattern}")
-done
+if [[ ${#EXCLUDE_PATTERNS[@]} -gt 0 ]]; then
+    for exclude_pattern in "${EXCLUDE_PATTERNS[@]}"; do
+        DNF_EXCLUDE_ARGS+=("--exclude=${exclude_pattern}")
+    done
+fi
 
 vault_dnf()
 {
@@ -239,7 +292,21 @@ printf '%s\n' \
     'enablerepo=rocky-8.8-vault-extras' \
     > "${WORK_DIR}/state/dnf-repository-isolation.txt"
 
+if [[ ${#DISABLED_REPOSITORIES[@]} -gt 0 ]]; then
+    for disabled_repository in "${DISABLED_REPOSITORIES[@]}"; do
+        printf 'disablerepo=%s\n' "${disabled_repository}" \
+            >> "${WORK_DIR}/state/dnf-repository-isolation.txt"
+    done
+fi
+
 echo "標準repo設定の参照を無効化し、Rocky Linux 8.8 Vaultのメタデータを取得します。"
+
+if [[ ${#DISABLED_REPOSITORIES[@]} -gt 0 ]]; then
+    echo "引数で無効化する一時リポジトリ:"
+    printf '  %s\n' "${DISABLED_REPOSITORIES[@]}"
+else
+    echo "引数で無効化する一時リポジトリ: なし"
+fi
 
 vault_dnf -y --refresh makecache 2>&1 \
     | tee "${WORK_DIR}/state/dnf-vault-makecache.log"
