@@ -43,6 +43,26 @@ die()
     exit 1
 }
 
+signature_log_has_failure()
+{
+    local signature_log="$1"
+
+    awk '
+        {
+            separator = index($0, ": ")
+            if (separator == 0) {
+                next
+            }
+
+            status = toupper(substr($0, separator + 2))
+            if (status ~ /(^|[^[:alnum:]_])(NOKEY|NOTTRUSTED|NOT OK|BAD)([^[:alnum:]_]|$)/) {
+                failure = 1
+            }
+        }
+        END {exit failure ? 0 : 1}
+    ' "${signature_log}"
+}
+
 EXCLUDE_PATTERNS=()
 ENABLED_REPOSITORIES=()
 DISABLED_REPOSITORIES=()
@@ -423,13 +443,12 @@ fi
 
 SIGNATURE_LOG="${WORK_DIR}/state/rpm-signatures.txt"
 if ! find "${WORK_DIR}/rpms" -type f -name '*.rpm' -print0 \
-    | xargs -0 -r rpm --checksig > "${SIGNATURE_LOG}" 2>&1; then
+    | LC_ALL=C xargs -0 -r rpm --checksig > "${SIGNATURE_LOG}" 2>&1; then
     sed -n '1,200p' "${SIGNATURE_LOG}"
     die "RPM署名の検証コマンドが失敗しました。"
 fi
 
-if grep -Eiq '(^|[^[:alnum:]_])(NOKEY|NOTTRUSTED|NOT OK|BAD)([^[:alnum:]_]|$)' \
-    "${SIGNATURE_LOG}"; then
+if signature_log_has_failure "${SIGNATURE_LOG}"; then
     sed -n '1,200p' "${SIGNATURE_LOG}"
     die "署名を検証できないRPMが含まれています。"
 fi
