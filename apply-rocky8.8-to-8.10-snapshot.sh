@@ -12,6 +12,87 @@ die()
     exit 1
 }
 
+validate_preinstalled_kernel_drift()
+{
+    local expected_state="$1"
+    local current_state="$2"
+    local archive_manifest="$3"
+    local archive_header_manifest="$4"
+    local current_header_manifest="$5"
+    local work_dir="$6"
+    local added_packages="${work_dir}/package-drift-added.txt"
+    local removed_packages="${work_dir}/package-drift-removed.txt"
+    local package_line package_name package_arch archive_identity current_identity
+
+    if ! LC_ALL=C comm -13 "${expected_state}" "${current_state}" > "${added_packages}" \
+        || ! LC_ALL=C comm -23 "${expected_state}" "${current_state}" > "${removed_packages}"; then
+        echo "パッケージ差分の集合を作成できませんでした。" >&2
+        return 1
+    fi
+
+    if [[ ! -s "${added_packages}" ]]; then
+        echo "保存済みkernel RPMに一致する追加パッケージがありません。" >&2
+        return 1
+    fi
+
+    while IFS= read -r package_line; do
+        package_name="${package_line%%$'\t'*}"
+
+        case "${package_name}" in
+            kernel|kernel-*)
+                ;;
+            *)
+                echo "kernel関連以外の追加パッケージです: ${package_line}" >&2
+                return 1
+                ;;
+        esac
+
+        if ! grep -Fqx -- "${package_line}" "${archive_manifest}"; then
+            echo "保存済みRPMに存在しないkernel関連パッケージです: ${package_line}" >&2
+            return 1
+        fi
+
+        archive_identity="$(
+            awk -F '\t' -v wanted="${package_line}" \
+                'BEGIN {OFS = "\t"} $1 OFS $2 OFS $3 == wanted {print}' \
+                "${archive_header_manifest}"
+        )"
+        current_identity="$(
+            awk -F '\t' -v wanted="${package_line}" \
+                'BEGIN {OFS = "\t"} $1 OFS $2 OFS $3 == wanted {print}' \
+                "${current_header_manifest}"
+        )"
+
+        if [[ -z "${archive_identity}" || "${archive_identity}" != "${current_identity}" ]]; then
+            echo "保存済みRPMと不変ヘッダーIDが一致しません: ${package_line}" >&2
+            return 1
+        fi
+    done < "${added_packages}"
+
+    while IFS= read -r package_line; do
+        package_name="${package_line%%$'\t'*}"
+        package_arch="${package_line##*$'\t'}"
+
+        case "${package_name}" in
+            kernel|kernel-*)
+                ;;
+            *)
+                echo "kernel関連以外の削除・更新パッケージです: ${package_line}" >&2
+                return 1
+                ;;
+        esac
+
+        if ! awk -F '\t' -v name="${package_name}" -v arch="${package_arch}" \
+            '$1 == name && $3 == arch {found = 1} END {exit !found}' \
+            "${added_packages}"; then
+            echo "同名・同一archの保存済みkernel RPMへの置換ではありません: ${package_line}" >&2
+            return 1
+        fi
+    done < "${removed_packages}"
+
+    return 0
+}
+
 if [[ "${EUID}" -ne 0 ]]; then
     die "rootで実行してください。"
 fi
@@ -29,12 +110,16 @@ if ! grep -Eq '^Rocky Linux release 8\.8([[:space:]]|$)' /etc/rocky-release; the
 fi
 
 for command_name in \
-    awk cat cmp date diff dnf find grep mktemp readlink rm rpm sed sha256sum sort tar tee tr
+    awk cat cmp comm date diff dnf find grep mktemp readlink rm rpm sed sha256sum sort tar tee tr
 do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         die "必要なコマンドが見つかりません: ${command_name}"
     fi
 done
+
+if ! LC_ALL=C rpm --querytags | grep -Fqx 'SHA1HEADER'; then
+    die "RPMの不変ヘッダーID（SHA1HEADER）を取得できません。"
+fi
 
 if [[ ! -f "$1" ]]; then
     die "アーカイブが見つかりません: $1"
@@ -215,6 +300,20 @@ if ! cmp -s "${STATE_DIR}/rpm-manifest.txt" "${ACTUAL_MANIFEST}"; then
     die "RPMから再取得したNEVRAとstateのマニフェストが一致しません。"
 fi
 
+ARCHIVE_HEADER_MANIFEST="${APPLY_ROOT}/rpm-header-manifest-verified.txt"
+LC_ALL=C rpm -qp \
+    --qf '%{NAME}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\t%{ARCH}\t%{SHA1HEADER}\n' \
+    "${RPM_FILES[@]}" \
+    | awk -F '\t' 'BEGIN {OFS = "\t"} {$4 = tolower($4); print}' \
+    | LC_ALL=C sort \
+    > "${ARCHIVE_HEADER_MANIFEST}"
+
+if ! awk -F '\t' \
+    'NF != 4 || length($4) != 40 || $4 !~ /^[[:xdigit:]]+$/ {invalid = 1} END {exit invalid}' \
+    "${ARCHIVE_HEADER_MANIFEST}"; then
+    die "保存済みRPMの不変ヘッダーIDを検証できません。"
+fi
+
 VERIFIED_TARGET_KERNELS="${APPLY_ROOT}/target-kernel-core-rpms-verified.txt"
 VERIFIED_TARGET_RELEASE="${APPLY_ROOT}/target-rocky-release-rpms-verified.txt"
 
@@ -260,18 +359,40 @@ package_list()
         | LC_ALL=C sort
 }
 
+CURRENT_HEADER_MANIFEST="${APPLY_ROOT}/installed-current-with-header.txt"
+LC_ALL=C rpm -qa \
+    --qf '%{NAME}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\t%{ARCH}\t%{SHA1HEADER}\n' \
+    | awk -F '\t' 'BEGIN {OFS = "\t"} {$4 = tolower($4); print}' \
+    | LC_ALL=C sort \
+    > "${CURRENT_HEADER_MANIFEST}"
+
 CURRENT_STATE="${APPLY_ROOT}/installed-current.txt"
-package_list > "${CURRENT_STATE}"
+awk -F '\t' 'BEGIN {OFS = "\t"} {print $1, $2, $3}' \
+    "${CURRENT_HEADER_MANIFEST}" \
+    > "${CURRENT_STATE}"
 
 if ! cmp -s "${STATE_DIR}/installed-baseline-for-apply.txt" "${CURRENT_STATE}"; then
     DIFF_LOG="/var/log/rocky8.8-to-8.10-package-drift-${RUN_ID}.diff"
     diff -u "${STATE_DIR}/installed-baseline-for-apply.txt" "${CURRENT_STATE}" \
         > "${DIFF_LOG}" || true
 
-    echo "ERROR: スナップショット取得後にパッケージ構成が変化しています。" >&2
-    echo "差分: ${DIFF_LOG}" >&2
-    sed -n '1,200p' "${DIFF_LOG}"
-    exit 3
+    if validate_preinstalled_kernel_drift \
+        "${STATE_DIR}/installed-baseline-for-apply.txt" \
+        "${CURRENT_STATE}" \
+        "${ACTUAL_MANIFEST}" \
+        "${ARCHIVE_HEADER_MANIFEST}" \
+        "${CURRENT_HEADER_MANIFEST}" \
+        "${APPLY_ROOT}"; then
+        echo "WARNING: 保存済みRPMと一致するkernel関連パッケージだけが先行導入されています。" >&2
+        echo "WARNING: 限定的な許可条件を満たしたため、オフライン事前検証へ進みます。" >&2
+        echo "差分: ${DIFF_LOG}" >&2
+        sed -n '1,200p' "${DIFF_LOG}"
+    else
+        echo "ERROR: スナップショット取得後に許可されないパッケージ構成の変化があります。" >&2
+        echo "差分: ${DIFF_LOG}" >&2
+        sed -n '1,200p' "${DIFF_LOG}"
+        exit 3
+    fi
 fi
 
 DNF_ARGS=(

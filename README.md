@@ -137,6 +137,16 @@ BaseOSを無効化すると、8.10の `kernel-core` や `rocky-release` を取�
 
 取得後から適用前までの間に、対象ホストでRPMの追加・更新・削除を行わないでください。取得時のパッケージ状態と異なる場合、専用適用スクリプトはベースライン不一致として停止します。
 
+例外として、スナップショットに保存されたkernel関連RPMを先に導入した場合だけ、自動検証後に適用を継続できます。許可条件はすべて満たす必要があります。
+
+- 追加されたパッケージ名が `kernel` または `kernel-` で始まる
+- 名前、Epoch、Version、Release、Architectureが保存済みRPMと一致する
+- インストール済みRPMの不変ヘッダーIDが保存済みRPMと一致する
+- installonly上限などで旧パッケージが削除されている場合は、同名・同一Architectureの保存済み新RPMが追加されている
+- kernel関連以外の追加・更新・削除がない
+
+条件を満たす場合も差分を `/var/log/rocky8.8-to-8.10-package-drift-*.diff` に保存し、外部repoを無効化したDNFテストトランザクションを実行してから適用します。条件外の差分は従来どおり終了コード3で停止します。この例外は旧形式用の `apply-rocky8-snapshot-update.sh` には適用されません。
+
 ```bash
 sudo ./apply-rocky8.8-to-8.10-snapshot.sh \
   /var/lib/rocky-update-snapshots/rocky8.8-to-8.10-update-YYYYMMDD-HHMMSS.tar
@@ -178,6 +188,8 @@ sudo dnf check
 ### RHEL版の前提
 
 RHEL版は、ホストにすでに構成されているRHSM、クラウドRHUI、またはRed Hat Satelliteのrepoを使用します。Red Hatのコンテンツへアクセスできる有効な購読またはクラウド契約と、RHEL 8.10コンテンツを提供するrepoが必要です。
+
+RHEL専用適用スクリプトもRocky Linux版と同じ限定条件で、保存済みkernel関連RPMの先行導入を許可します。許可された場合も差分を `/var/log/rhel8.8-to-8.10-package-drift-*.diff` に記録し、オフラインDNFテストトランザクションを省略しません。
 
 次を事前に確認してください。
 
