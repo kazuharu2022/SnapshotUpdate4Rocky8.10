@@ -78,6 +78,9 @@ run_cases \
     "${REPO_ROOT}/apply-rocky8.8-to-8.10-snapshot.sh" \
     "apply-rocky"
 run_cases \
+    "${REPO_ROOT}/apply-rocky8.8-to-8.10-installroot.sh" \
+    "apply-rocky-installroot"
+run_cases \
     "${REPO_ROOT}/apply-rhel8.8-to-8.10-snapshot.sh" \
     "apply-rhel"
 run_cases \

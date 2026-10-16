@@ -10,6 +10,7 @@ Rocky Linux 8.8またはRed Hat Enterprise Linux（RHEL）8.8で、8.10への更
 | --- | --- |
 | `capture-rocky8.8-to-8.10-snapshot.sh` | Rocky Linux 8.8から8.10へ更新するRPMを取得 |
 | `apply-rocky8.8-to-8.10-snapshot.sh` | 上記スナップショットを検証し、Rocky Linux 8.8へオフライン適用 |
+| `apply-rocky8.8-to-8.10-installroot.sh` | RockyスナップショットをPXE用Rocky 8.8 rootfsへ `dnf --installroot` で適用 |
 | `capture-rhel8.8-to-8.10-snapshot.sh` | RHEL 8.8から8.10へ更新するRPMを構成済みrepoから取得 |
 | `apply-rhel8.8-to-8.10-snapshot.sh` | RHEL専用スナップショットを検証し、RHEL 8.8へオフライン適用 |
 | `capture-rocky8.8-vault-snapshot.sh` | Rocky Linux 8.8 Vaultの最終状態までの更新RPMを取得。8.10には更新しない |
@@ -47,6 +48,7 @@ chmod +x \
   capture-rocky8.8-to-8.10-snapshot.sh \
   capture-rocky8.8-vault-snapshot.sh \
   apply-rocky8.8-to-8.10-snapshot.sh \
+  apply-rocky8.8-to-8.10-installroot.sh \
   capture-rhel8.8-to-8.10-snapshot.sh \
   apply-rhel8.8-to-8.10-snapshot.sh
 ```
@@ -164,6 +166,47 @@ sudo ./apply-rocky8.8-to-8.10-snapshot.sh \
 - オフラインDNFのテストトランザクション
 
 検証後に更新内容が表示され、実際に適用する前に確認を求めます。8.8から8.10へのスナップショットには、旧 `apply-rocky8-snapshot-update.sh` を使用しないでください。
+
+### PXE用rootfsへ `dnf --installroot` で適用する
+
+稼働中ホストではなく、PXEブート用のRocky Linux rootfsを更新する場合は、installroot専用スクリプトを使用します。
+
+```bash
+CHROOT=/srv/pxe/rocky8-rootfs
+
+sudo ./apply-rocky8.8-to-8.10-installroot.sh \
+  --installroot "${CHROOT}" \
+  /var/lib/rocky-update-snapshots/rocky8.8-to-8.10-update-YYYYMMDDTHHMMSS+0900.tar
+```
+
+`CHROOT`には絶対パスを指定します。対象は、次を含む完全なRocky Linux 8.8 rootfsである必要があります。
+
+- `etc/rocky-release`
+- Rocky Linux 8.8のRPM DB
+- スナップショット取得時と同じパッケージ構成
+- `boot/`
+- kernel/dracutのscriptletが実行できるユーザー空間
+
+空のTFTPディレクトリや単独の `boot/` ディレクトリには適用できません。また、安全のためホストの `/` はinstallrootとして拒否します。
+
+内部では外部repoをすべて無効化し、次の形式で保存済みRPMだけをインストールします。
+
+```text
+dnf --installroot="${CHROOT}" --releasever=8.10 ... install <保存済みRPM>
+```
+
+実トランザクションの前に同じinstallrootに対するDNFテストトランザクションを実行します。アーカイブ、RPM、署名、取得時のパッケージ状態も通常の専用applyと同様に検証します。保存済みkernel関連RPMだけが先行導入されている場合に限り、不変ヘッダーIDまで一致すれば継続できます。ホスト側プラグインの影響を避けるため、installrootへのDNF処理では `--noplugins` を使用します。
+
+kernelやdracutのscriptletが `/dev`、`/proc`、`/sys` を必要とする環境では、管理者が事前に適切なbind mountを用意してください。スクリプトはホストのマウント状態を自動変更せず、未マウントを検出できた場合は警告します。
+
+適用後は次のPXE成果物が `${CHROOT}/boot` に生成されたことを必須確認します。
+
+- `vmlinuz-<8.10 kernel version>`
+- `initramfs-<8.10 kernel version>.img`
+
+成果物が不足した場合、スクリプトはエラー終了します。ただしDNFトランザクション自体はすでに完了している可能性があるため、ロールバックされたものとは扱わず、rootfs内のログとdracut/kernel-installの状態を確認してください。
+
+ログは `${CHROOT}/var/log/rocky8.8-to-8.10-installroot-*` に保存されます。ホストOSのRPM DBとカーネルは更新しません。PXEサーバー固有のDHCP、TFTP、iPXE、NFS設定や配信用ファイル名の切り替えは、このスクリプトの対象外です。
 
 ### 5. 再起動して確認する
 
