@@ -179,15 +179,17 @@ sudo ./apply-rocky8.8-to-8.10-installroot.sh \
   /var/lib/rocky-update-snapshots/rocky8.8-to-8.10-update-YYYYMMDDTHHMMSS+0900.tar
 ```
 
-`CHROOT`には絶対パスを指定します。対象は、次を含む完全なRocky Linux 8.8 rootfsである必要があります。
+`CHROOT`には絶対パスを指定します。対象は、次を含む完全なRocky Linux 8.8または8.10 rootfsである必要があります。
 
-- `etc/rocky-release`
-- Rocky Linux 8.8のRPM DB
+- `etc/os-release`
+- Rocky Linux 8.8または8.10のRPM DB
 - スナップショット取得時と同じパッケージ構成
 - `boot/`
 - kernel/dracutのscriptletが実行できるユーザー空間
 
 空のTFTPディレクトリや単独の `boot/` ディレクトリには適用できません。また、安全のためホストの `/` はinstallrootとして拒否します。
+
+更新前後のOS判定では、ホスト側の `/etc/os-release` は参照しません。`chroot "${CHROOT}" /bin/cat /etc/os-release` でPXE用rootfs内の `ID=rocky` と `VERSION_ID` を読み取ります。更新前は8.8または8.10、更新後は8.10であることを確認します。
 
 内部では外部repoをすべて無効化し、次の形式で保存済みRPMだけをインストールします。
 
@@ -195,7 +197,7 @@ sudo ./apply-rocky8.8-to-8.10-installroot.sh \
 dnf --installroot="${CHROOT}" --releasever=8.10 ... install <保存済みRPM>
 ```
 
-実トランザクションの前に同じinstallrootに対するDNFテストトランザクションを実行します。アーカイブ、RPM、署名、取得時のパッケージ状態も通常の専用applyと同様に検証します。保存済みkernel関連RPMだけが先行導入されている場合に限り、不変ヘッダーIDまで一致すれば継続できます。ホスト側プラグインの影響を避けるため、installrootへのDNF処理では `--noplugins` を使用します。
+実トランザクションの前に同じinstallrootに対するDNFテストトランザクションを実行します。アーカイブ、RPM、署名、取得時のパッケージ状態も通常の専用applyと同様に検証します。8.8では保存済みkernel関連RPMだけが先行導入されている場合に限り、不変ヘッダーIDまで一致すれば継続できます。既に8.10の場合は、基準との差分が保存済みRPMに含まれ、不変ヘッダーIDまで一致する先行適用分だけである場合に限って再実行できます。無関係な追加・削除・更新があるrootfsは拒否します。ホスト側プラグインの影響を避けるため、installrootへのDNF処理では `--noplugins` を使用します。
 
 kernelやdracutのscriptletが `/dev`、`/proc`、`/sys` を必要とする環境では、管理者が事前に適切なbind mountを用意してください。スクリプトはホストのマウント状態を自動変更せず、未マウントを検出できた場合は警告します。
 

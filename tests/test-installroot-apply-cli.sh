@@ -61,5 +61,15 @@ grep -Fq -- '"--noplugins"' "${SCRIPT}"
 grep -Fq -- 'install "${RPM_FILES[@]}"' "${SCRIPT}"
 grep -Fq -- '"${INSTALLROOT}/boot/vmlinuz-' "${SCRIPT}"
 grep -Fq -- '"${INSTALLROOT}/boot/initramfs-' "${SCRIPT}"
+grep -Fq -- 'chroot "${INSTALLROOT}" /bin/cat /etc/os-release' "${SCRIPT}"
+grep -Fq -- 'validate_installroot_release "更新前" "${SOURCE_VERSION}" "${TARGET_VERSION}"' "${SCRIPT}"
+grep -Fq -- 'validate_installroot_release "適用後" "${TARGET_VERSION}"' "${SCRIPT}"
+grep -Fq -- 'ALLOWED_DRIFT_SCOPE="archive"' "${SCRIPT}"
+
+if grep -Fq -- 'grep -Eq' "${SCRIPT}" \
+    && grep -Fq -- '"${INSTALLROOT}/etc/rocky-release"' "${SCRIPT}"; then
+    echo "FAIL: installrootのOS判定がchroot外のrocky-releaseを参照しています。" >&2
+    exit 1
+fi
 
 echo "PASS: installroot apply CLI and static contract"

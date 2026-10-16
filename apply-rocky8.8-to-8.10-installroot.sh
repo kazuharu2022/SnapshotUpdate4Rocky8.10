@@ -31,6 +31,66 @@ die()
     exit 1
 }
 
+os_release_value()
+{
+    local key="$1"
+
+    awk -v key="${key}" '
+        index($0, key "=") == 1 {
+            value = substr($0, length(key) + 2)
+            sub(/\r$/, "", value)
+
+            first = substr(value, 1, 1)
+            last = substr(value, length(value), 1)
+            if ((first == "\"" && last == "\"") || (first == "\047" && last == "\047")) {
+                value = substr(value, 2, length(value) - 2)
+            }
+
+            print value
+            exit
+        }
+    '
+}
+
+validate_installroot_release()
+{
+    local validation_phase="$1"
+    shift
+    local expected_version expected_versions="" version_matches=0
+
+    if ! INSTALLROOT_OS_RELEASE_CONTENT="$(
+        chroot "${INSTALLROOT}" /bin/cat /etc/os-release 2>/dev/null
+    )"; then
+        die "${validation_phase}のinstallroot内で/etc/os-releaseを読み込めません。完全なrootfsを指定してください。"
+    fi
+
+    INSTALLROOT_OS_ID="$(
+        printf '%s\n' "${INSTALLROOT_OS_RELEASE_CONTENT}" | os_release_value ID
+    )"
+    INSTALLROOT_OS_VERSION="$(
+        printf '%s\n' "${INSTALLROOT_OS_RELEASE_CONTENT}" | os_release_value VERSION_ID
+    )"
+
+    for expected_version in "$@"; do
+        if [[ -n "${expected_versions}" ]]; then
+            expected_versions+="または"
+        fi
+        expected_versions+="${expected_version}"
+
+        if [[ "${INSTALLROOT_OS_VERSION}" == "${expected_version}" ]]; then
+            version_matches=1
+        fi
+    done
+
+    if [[ "${INSTALLROOT_OS_ID}" != "rocky" ]] \
+        || [[ "${version_matches}" -ne 1 ]]; then
+        echo "ERROR: ${validation_phase}のinstallrootがRocky Linux ${expected_versions}ではありません。" >&2
+        echo "chroot内/etc/os-release: ID=${INSTALLROOT_OS_ID:-未設定} VERSION_ID=${INSTALLROOT_OS_VERSION:-未設定}" >&2
+        printf '%s\n' "${INSTALLROOT_OS_RELEASE_CONTENT}" >&2
+        return 1
+    fi
+}
+
 signature_log_has_failure()
 {
     local signature_log="$1"
@@ -51,7 +111,7 @@ signature_log_has_failure()
     ' "${signature_log}"
 }
 
-validate_preinstalled_kernel_drift()
+validate_preinstalled_drift()
 {
     local expected_state="$1"
     local current_state="$2"
@@ -59,9 +119,19 @@ validate_preinstalled_kernel_drift()
     local archive_header_manifest="$4"
     local current_header_manifest="$5"
     local work_dir="$6"
+    local allowed_scope="$7"
     local added_packages="${work_dir}/package-drift-added.txt"
     local removed_packages="${work_dir}/package-drift-removed.txt"
     local package_line package_name package_arch archive_identity current_identity
+
+    case "${allowed_scope}" in
+        kernel|archive)
+            ;;
+        *)
+            echo "不明なパッケージ差分許可範囲です: ${allowed_scope}" >&2
+            return 1
+            ;;
+    esac
 
     if ! LC_ALL=C comm -13 "${expected_state}" "${current_state}" > "${added_packages}" \
         || ! LC_ALL=C comm -23 "${expected_state}" "${current_state}" > "${removed_packages}"; then
@@ -70,24 +140,26 @@ validate_preinstalled_kernel_drift()
     fi
 
     if [[ ! -s "${added_packages}" ]]; then
-        echo "保存済みkernel RPMに一致する追加パッケージがありません。" >&2
+        echo "保存済みRPMに一致する追加パッケージがありません。" >&2
         return 1
     fi
 
     while IFS= read -r package_line; do
         package_name="${package_line%%$'\t'*}"
 
-        case "${package_name}" in
-            kernel|kernel-*)
-                ;;
-            *)
-                echo "kernel関連以外の追加パッケージです: ${package_line}" >&2
-                return 1
-                ;;
-        esac
+        if [[ "${allowed_scope}" == "kernel" ]]; then
+            case "${package_name}" in
+                kernel|kernel-*)
+                    ;;
+                *)
+                    echo "kernel関連以外の追加パッケージです: ${package_line}" >&2
+                    return 1
+                    ;;
+            esac
+        fi
 
         if ! grep -Fqx -- "${package_line}" "${archive_manifest}"; then
-            echo "保存済みRPMに存在しないkernel関連パッケージです: ${package_line}" >&2
+            echo "保存済みRPMに存在しない追加パッケージです: ${package_line}" >&2
             return 1
         fi
 
@@ -112,19 +184,21 @@ validate_preinstalled_kernel_drift()
         package_name="${package_line%%$'\t'*}"
         package_arch="${package_line##*$'\t'}"
 
-        case "${package_name}" in
-            kernel|kernel-*)
-                ;;
-            *)
-                echo "kernel関連以外の削除・更新パッケージです: ${package_line}" >&2
-                return 1
-                ;;
-        esac
+        if [[ "${allowed_scope}" == "kernel" ]]; then
+            case "${package_name}" in
+                kernel|kernel-*)
+                    ;;
+                *)
+                    echo "kernel関連以外の削除・更新パッケージです: ${package_line}" >&2
+                    return 1
+                    ;;
+            esac
+        fi
 
         if ! awk -F '\t' -v name="${package_name}" -v arch="${package_arch}" \
             '$1 == name && $3 == arch {found = 1} END {exit !found}' \
             "${added_packages}"; then
-            echo "同名・同一archの保存済みkernel RPMへの置換ではありません: ${package_line}" >&2
+            echo "同名・同一archの保存済みRPMへの置換ではありません: ${package_line}" >&2
             return 1
         fi
     done < "${removed_packages}"
@@ -210,7 +284,7 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 for command_name in \
-    awk cat cmp comm date diff dnf find grep mkdir mktemp readlink rm rpm sed sha256sum sort tar tee tr
+    awk cat chroot cmp comm date diff dnf find grep mkdir mktemp readlink rm rpm sed sha256sum sort tar tee tr
 do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
         die "必要なコマンドが見つかりません: ${command_name}"
@@ -226,13 +300,11 @@ if [[ -z "${INSTALLROOT}" || "${INSTALLROOT}" == "/" ]]; then
     die "ホストの / はinstallrootとして指定できません。"
 fi
 
-if [[ ! -r "${INSTALLROOT}/etc/rocky-release" ]] \
-    || ! grep -Eq '^Rocky Linux release 8[.]8([[:space:]]|$)' \
-        "${INSTALLROOT}/etc/rocky-release"; then
-    echo "ERROR: installrootがRocky Linux ${SOURCE_VERSION}ではありません。" >&2
-    cat "${INSTALLROOT}/etc/rocky-release" 2>/dev/null || true
-    exit 1
-fi
+INSTALLROOT_OS_RELEASE_CONTENT=""
+INSTALLROOT_OS_ID=""
+INSTALLROOT_OS_VERSION=""
+validate_installroot_release "更新前" "${SOURCE_VERSION}" "${TARGET_VERSION}"
+INSTALLROOT_INITIAL_VERSION="${INSTALLROOT_OS_VERSION}"
 
 if ! rpm --root "${INSTALLROOT}" -q rocky-release >/dev/null 2>&1; then
     die "installrootのRPM DBでrocky-releaseを確認できません。完全なrootfsを指定してください。"
@@ -243,8 +315,8 @@ INSTALLROOT_ROCKY_VERSION="$(
         --qf '%{VERSION}\n' 2>/dev/null \
         | LC_ALL=C sort -u
 )"
-if [[ "${INSTALLROOT_ROCKY_VERSION}" != "${SOURCE_VERSION}" ]]; then
-    die "installrootのrocky-release RPMが${SOURCE_VERSION}ではありません: ${INSTALLROOT_ROCKY_VERSION}"
+if [[ "${INSTALLROOT_ROCKY_VERSION}" != "${INSTALLROOT_INITIAL_VERSION}" ]]; then
+    die "installroot内の/etc/os-releaseとrocky-release RPMのバージョンが一致しません: os-release=${INSTALLROOT_INITIAL_VERSION} RPM=${INSTALLROOT_ROCKY_VERSION}"
 fi
 
 if ! LC_ALL=C rpm --querytags | grep -Fqx 'SHA1HEADER'; then
@@ -513,14 +585,26 @@ if ! cmp -s "${STATE_DIR}/installed-baseline-for-apply.txt" "${CURRENT_STATE}"; 
     diff -u "${STATE_DIR}/installed-baseline-for-apply.txt" "${CURRENT_STATE}" \
         > "${DIFF_LOG}" || true
 
-    if validate_preinstalled_kernel_drift \
+    if [[ "${INSTALLROOT_INITIAL_VERSION}" == "${TARGET_VERSION}" ]]; then
+        ALLOWED_DRIFT_SCOPE="archive"
+    else
+        ALLOWED_DRIFT_SCOPE="kernel"
+    fi
+
+    if validate_preinstalled_drift \
         "${STATE_DIR}/installed-baseline-for-apply.txt" \
         "${CURRENT_STATE}" \
         "${ACTUAL_MANIFEST}" \
         "${ARCHIVE_HEADER_MANIFEST}" \
         "${CURRENT_HEADER_MANIFEST}" \
-        "${APPLY_ROOT}"; then
-        echo "WARNING: 保存済みRPMと一致するkernel関連パッケージだけがinstallrootへ先行導入されています。" >&2
+        "${APPLY_ROOT}" \
+        "${ALLOWED_DRIFT_SCOPE}"; then
+        if [[ "${ALLOWED_DRIFT_SCOPE}" == "archive" ]]; then
+            echo "WARNING: installrootは既にRocky Linux ${TARGET_VERSION}です。" >&2
+            echo "WARNING: 基準との差分は、不変ヘッダーIDまで保存済みRPMと一致する先行適用分だけです。" >&2
+        else
+            echo "WARNING: 保存済みRPMと一致するkernel関連パッケージだけがinstallrootへ先行導入されています。" >&2
+        fi
         echo "WARNING: 限定的な許可条件を満たしたため、オフライン事前検証へ進みます。" >&2
         echo "差分: ${DIFF_LOG}" >&2
         sed -n '1,200p' "${DIFF_LOG}"
@@ -582,10 +666,7 @@ dnf \
     --disablerepo='*' \
     check 2>&1 | tee -a "${APPLY_LOG}"
 
-if ! grep -Eq '^Rocky Linux release 8[.]10([[:space:]]|$)' \
-    "${INSTALLROOT}/etc/rocky-release"; then
-    die "適用後のinstallrootがRocky Linux ${TARGET_VERSION}ではありません。"
-fi
+validate_installroot_release "適用後" "${TARGET_VERSION}"
 
 INSTALLED_AFTER="${APPLY_ROOT}/installed-after.txt"
 package_list > "${INSTALLED_AFTER}"
@@ -631,7 +712,7 @@ fi
 
 echo
 echo "installrootのリリース:"
-cat "${INSTALLROOT}/etc/rocky-release"
+printf '%s\n' "${INSTALLROOT_OS_RELEASE_CONTENT}"
 
 echo
 echo "installrootのkernel-core:"
