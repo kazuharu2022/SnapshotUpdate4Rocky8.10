@@ -7,6 +7,12 @@ readonly ROCKY_MIRRORLIST="https://mirrors.rockylinux.org/mirrorlist"
 readonly BASE_DIR="/var/lib/rocky-update-snapshots"
 readonly ROCKY_GPG_KEY="/etc/pki/rpm-gpg/RPM-GPG-KEY-rockyofficial"
 
+SNAPSHOT_REPOSITORY_IDS=(
+    "rocky-8.10-installroot-baseos"
+    "rocky-8.10-installroot-appstream"
+    "rocky-8.10-installroot-extras"
+)
+
 usage()
 {
     cat <<'USAGE_EOF'
@@ -20,7 +26,7 @@ usage()
       --installroot=PATH   同上
   -x, --exclude PATTERN    DNF/YUMの更新対象からPATTERNを除外する
       --exclude=PATTERN    同上
-      --disablerepo REPOID 一時リポジトリからREPOIDを無効化する
+      --disablerepo REPOID REPOIDを取得対象から明示的に除外する
       --disablerepo=REPOID 同上
   -h, --help               このヘルプを表示する
 
@@ -31,6 +37,10 @@ usage()
   rocky-8.10-installroot-baseos
   rocky-8.10-installroot-appstream
   rocky-8.10-installroot-extras
+
+installroot内の/etc/yum.repos.d/*.repoは常に取得対象から隔離されます。
+そこに定義されたrepo IDも--disablerepoへ指定できますが、指定しなくても
+取得処理では使用されません。repo IDは[name]の角括弧内であり、name=の値ではありません。
 
 例:
   sudo ./capture-rocky8.10-installroot-snapshot.sh \
@@ -92,6 +102,8 @@ os_release_value()
 INSTALLROOT_INPUT=""
 EXCLUDE_PATTERNS=()
 DISABLED_REPOSITORIES=()
+EXCLUDE_PATTERN_COUNT=0
+DISABLED_REPOSITORY_COUNT=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -124,7 +136,8 @@ while [[ $# -gt 0 ]]; do
                 echo "ERROR: $1 には空でない除外パターンが必要です。" >&2
                 exit 2
             fi
-            EXCLUDE_PATTERNS+=("$2")
+            EXCLUDE_PATTERNS[${EXCLUDE_PATTERN_COUNT}]="$2"
+            EXCLUDE_PATTERN_COUNT=$((EXCLUDE_PATTERN_COUNT + 1))
             shift 2
             ;;
         --exclude=*)
@@ -133,7 +146,8 @@ while [[ $# -gt 0 ]]; do
                 echo "ERROR: --exclude には空でない除外パターンが必要です。" >&2
                 exit 2
             fi
-            EXCLUDE_PATTERNS+=("${exclude_pattern}")
+            EXCLUDE_PATTERNS[${EXCLUDE_PATTERN_COUNT}]="${exclude_pattern}"
+            EXCLUDE_PATTERN_COUNT=$((EXCLUDE_PATTERN_COUNT + 1))
             shift
             ;;
         --disablerepo)
@@ -141,7 +155,8 @@ while [[ $# -gt 0 ]]; do
                 echo "ERROR: --disablerepo には空でないリポジトリIDが必要です。" >&2
                 exit 2
             fi
-            DISABLED_REPOSITORIES+=("$2")
+            DISABLED_REPOSITORIES[${DISABLED_REPOSITORY_COUNT}]="$2"
+            DISABLED_REPOSITORY_COUNT=$((DISABLED_REPOSITORY_COUNT + 1))
             shift 2
             ;;
         --disablerepo=*)
@@ -150,7 +165,8 @@ while [[ $# -gt 0 ]]; do
                 echo "ERROR: --disablerepo には空でないリポジトリIDが必要です。" >&2
                 exit 2
             fi
-            DISABLED_REPOSITORIES+=("${disabled_repository}")
+            DISABLED_REPOSITORIES[${DISABLED_REPOSITORY_COUNT}]="${disabled_repository}"
+            DISABLED_REPOSITORY_COUNT=$((DISABLED_REPOSITORY_COUNT + 1))
             shift
             ;;
         -h|--help)
@@ -185,7 +201,15 @@ if [[ "${INSTALLROOT_INPUT}" == *$'\n'* || "${INSTALLROOT_INPUT}" == *$'\r'* ]];
     die "--installrootのパスに改行は使用できません。"
 fi
 
-for option_value in "${EXCLUDE_PATTERNS[@]}" "${DISABLED_REPOSITORIES[@]}"; do
+for ((option_index = 0; option_index < EXCLUDE_PATTERN_COUNT; option_index++)); do
+    option_value="${EXCLUDE_PATTERNS[${option_index}]}"
+    if [[ "${option_value}" == *$'\n'* || "${option_value}" == *$'\r'* ]]; then
+        die "除外指定に改行は使用できません。"
+    fi
+done
+
+for ((option_index = 0; option_index < DISABLED_REPOSITORY_COUNT; option_index++)); do
+    option_value="${DISABLED_REPOSITORIES[${option_index}]}"
     if [[ "${option_value}" == *$'\n'* || "${option_value}" == *$'\r'* ]]; then
         die "除外指定に改行は使用できません。"
     fi
@@ -244,13 +268,13 @@ if [[ -n "${INSTALLROOT_OS_VERSION}" ]] \
     die "installroot内/etc/os-releaseのVERSION_IDが${TARGET_VERSION}ではありません: ${INSTALLROOT_OS_VERSION}"
 fi
 
-mapfile -t INSTALLED_KERNELS < <(
+INSTALLED_KERNELS="$(
     rpm --root "${INSTALLROOT}" -q kernel-core \
         --qf '%{NAME}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\t%{ARCH}\n' 2>/dev/null \
         | awk -F '\t' '$1 == "kernel-core" && $2 ~ /[.]el8_10([.]|$)/ {print}' \
         | LC_ALL=C sort -V
-)
-if [[ ${#INSTALLED_KERNELS[@]} -eq 0 ]]; then
+)"
+if [[ -z "${INSTALLED_KERNELS}" ]]; then
     die "installrootにRocky Linux 8.10用kernel-core（.el8_10）がありません。"
 fi
 
@@ -273,6 +297,7 @@ ARCHIVE="${BASE_DIR}/${SNAPSHOT_NAME}.tar"
 REPO_DIR="${WORK_DIR}/repo-config"
 DNF_CONFIG="${WORK_DIR}/dnf.conf"
 SNAPSHOT_GPG_KEY="${WORK_DIR}/RPM-GPG-KEY-rockyofficial"
+INSTALLROOT_REPOSITORY_IDS="${WORK_DIR}/state/installroot-repository-ids.txt"
 CACHE_RELATIVE="/var/cache/dnf/.${SNAPSHOT_NAME}.capture.$$"
 LOG_RELATIVE="/var/log/.${SNAPSHOT_NAME}.capture.$$"
 CACHE_HOST_PATH="${INSTALLROOT}${CACHE_RELATIVE}"
@@ -321,19 +346,106 @@ printf '%s\n' \
 printf '%s\n' "${INSTALLROOT}" \
     > "${WORK_DIR}/state/source-installroot.txt"
 
-if [[ ${#EXCLUDE_PATTERNS[@]} -gt 0 ]]; then
-    printf '%s\n' "${EXCLUDE_PATTERNS[@]}" \
-        > "${WORK_DIR}/state/requested-excludes.txt"
-else
-    : > "${WORK_DIR}/state/requested-excludes.txt"
+: > "${WORK_DIR}/state/requested-excludes.txt"
+for ((option_index = 0; option_index < EXCLUDE_PATTERN_COUNT; option_index++)); do
+    printf '%s\n' "${EXCLUDE_PATTERNS[${option_index}]}" \
+        >> "${WORK_DIR}/state/requested-excludes.txt"
+done
+
+: > "${WORK_DIR}/state/requested-disabled-repositories.txt"
+for ((option_index = 0; option_index < DISABLED_REPOSITORY_COUNT; option_index++)); do
+    printf '%s\n' "${DISABLED_REPOSITORIES[${option_index}]}" \
+        >> "${WORK_DIR}/state/requested-disabled-repositories.txt"
+done
+
+: > "${INSTALLROOT_REPOSITORY_IDS}"
+if [[ -d "${INSTALLROOT}/etc/yum.repos.d" ]]; then
+    while IFS= read -r -d '' installroot_repo_file; do
+        awk '
+            {
+                line = $0
+                sub(/\r$/, "", line)
+                if (line !~ /^[[:space:]]*\[[[:alnum:]_.:-]+\][[:space:]]*$/) {
+                    next
+                }
+                sub(/^[[:space:]]*\[/, "", line)
+                sub(/\][[:space:]]*$/, "", line)
+                print line
+            }
+        ' "${installroot_repo_file}"
+    done < <(
+        find "${INSTALLROOT}/etc/yum.repos.d" \
+            -maxdepth 1 -type f -name '*.repo' -print0
+    ) | LC_ALL=C sort -u > "${INSTALLROOT_REPOSITORY_IDS}"
 fi
 
-if [[ ${#DISABLED_REPOSITORIES[@]} -gt 0 ]]; then
-    printf '%s\n' "${DISABLED_REPOSITORIES[@]}" \
-        > "${WORK_DIR}/state/requested-disabled-repositories.txt"
-else
-    : > "${WORK_DIR}/state/requested-disabled-repositories.txt"
-fi
+repository_id_matches_pattern()
+{
+    local repository_id="$1"
+    local repository_pattern="$2"
+
+    case "${repository_id}" in
+        ${repository_pattern}) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+repository_pattern_is_known()
+{
+    local repository_pattern="$1"
+    local repository_id=""
+
+    for repository_id in "${SNAPSHOT_REPOSITORY_IDS[@]}"; do
+        if repository_id_matches_pattern "${repository_id}" "${repository_pattern}"; then
+            return 0
+        fi
+    done
+
+    while IFS= read -r repository_id; do
+        if [[ -n "${repository_id}" ]] \
+            && repository_id_matches_pattern "${repository_id}" "${repository_pattern}"; then
+            return 0
+        fi
+    done < "${INSTALLROOT_REPOSITORY_IDS}"
+
+    return 1
+}
+
+repository_id_is_disabled()
+{
+    local repository_id="$1"
+    local option_index=0
+    local pattern_list=""
+    local repository_pattern=""
+
+    for ((option_index = 0; option_index < DISABLED_REPOSITORY_COUNT; option_index++)); do
+        pattern_list="${DISABLED_REPOSITORIES[${option_index}]},"
+        while [[ -n "${pattern_list}" ]]; do
+            repository_pattern="${pattern_list%%,*}"
+            pattern_list="${pattern_list#*,}"
+            if [[ -n "${repository_pattern}" ]] \
+                && repository_id_matches_pattern "${repository_id}" "${repository_pattern}"; then
+                return 0
+            fi
+        done
+    done
+
+    return 1
+}
+
+for ((option_index = 0; option_index < DISABLED_REPOSITORY_COUNT; option_index++)); do
+    pattern_list="${DISABLED_REPOSITORIES[${option_index}]},"
+    while [[ -n "${pattern_list}" ]]; do
+        repository_pattern="${pattern_list%%,*}"
+        pattern_list="${pattern_list#*,}"
+        if [[ -z "${repository_pattern}" ]]; then
+            die "--disablerepoに空のリポジトリIDが含まれています。"
+        fi
+        if ! repository_pattern_is_known "${repository_pattern}"; then
+            die "--disablerepoに指定されたrepo IDまたはglobが見つかりません: ${repository_pattern}（name=ではなく[repo ID]を指定してください）"
+        fi
+    done
+done
 
 cat > "${DNF_CONFIG}" <<'DNF_CONFIG_EOF'
 [main]
@@ -390,21 +502,20 @@ DNF_ARGS=(
     "--setopt=retries=20"
     "--setopt=max_parallel_downloads=1"
     "--noplugins"
-    "--disableexcludes=all"
     "--disablerepo=*"
-    "--enablerepo=rocky-8.10-installroot-baseos"
-    "--enablerepo=rocky-8.10-installroot-appstream"
-    "--enablerepo=rocky-8.10-installroot-extras"
 )
 
-for disabled_repository in "${DISABLED_REPOSITORIES[@]}"; do
-    DNF_ARGS+=("--disablerepo=${disabled_repository}")
+ENABLED_SNAPSHOT_REPOSITORY_COUNT=0
+for snapshot_repository_id in "${SNAPSHOT_REPOSITORY_IDS[@]}"; do
+    if ! repository_id_is_disabled "${snapshot_repository_id}"; then
+        DNF_ARGS+=("--enablerepo=${snapshot_repository_id}")
+        ENABLED_SNAPSHOT_REPOSITORY_COUNT=$((ENABLED_SNAPSHOT_REPOSITORY_COUNT + 1))
+    fi
 done
 
-DNF_EXCLUDE_ARGS=()
-for exclude_pattern in "${EXCLUDE_PATTERNS[@]}"; do
-    DNF_EXCLUDE_ARGS+=("--exclude=${exclude_pattern}")
-done
+if [[ ${ENABLED_SNAPSHOT_REPOSITORY_COUNT} -eq 0 ]]; then
+    die "取得用のRocky Linuxリポジトリがすべて無効化されています。"
+fi
 
 snapshot_dnf()
 {
@@ -427,7 +538,7 @@ else
     : > "${WORK_DIR}/state/os-release.txt"
 fi
 
-printf '%s\n' "${INSTALLED_KERNELS[@]}" \
+printf '%s\n' "${INSTALLED_KERNELS}" \
     > "${WORK_DIR}/state/kernels-before.txt"
 
 uname -a > "${WORK_DIR}/state/host-uname.txt"
@@ -447,24 +558,32 @@ printf '%s\n' \
     "cachedir=${CACHE_RELATIVE}" \
     "logdir=${LOG_RELATIVE}" \
     "disablerepo=*" \
-    "enablerepo=rocky-8.10-installroot-baseos" \
-    "enablerepo=rocky-8.10-installroot-appstream" \
-    "enablerepo=rocky-8.10-installroot-extras" \
+    "installroot_repositories=not-loaded" \
     > "${WORK_DIR}/state/dnf-repository-isolation.txt"
 
-for disabled_repository in "${DISABLED_REPOSITORIES[@]}"; do
-    printf 'disablerepo=%s\n' "${disabled_repository}" \
+for snapshot_repository_id in "${SNAPSHOT_REPOSITORY_IDS[@]}"; do
+    if ! repository_id_is_disabled "${snapshot_repository_id}"; then
+        printf 'enablerepo=%s\n' "${snapshot_repository_id}" \
+            >> "${WORK_DIR}/state/dnf-repository-isolation.txt"
+    fi
+done
+
+for ((option_index = 0; option_index < DISABLED_REPOSITORY_COUNT; option_index++)); do
+    printf 'requested_disablerepo=%s\n' "${DISABLED_REPOSITORIES[${option_index}]}" \
         >> "${WORK_DIR}/state/dnf-repository-isolation.txt"
 done
 
 package_list > "${WORK_DIR}/state/installed-before-download.txt"
 
 echo "ホストのrepo設定を参照せず、Rocky Linux ${TARGET_VERSION}のメタデータを取得します。"
-if [[ ${#DISABLED_REPOSITORIES[@]} -gt 0 ]]; then
-    echo "引数で無効化する一時リポジトリ:"
-    printf '  %s\n' "${DISABLED_REPOSITORIES[@]}"
+echo "installroot内のrepo設定も取得対象から隔離します。"
+if [[ ${DISABLED_REPOSITORY_COUNT} -gt 0 ]]; then
+    echo "引数で明示的に除外するリポジトリ:"
+    for ((option_index = 0; option_index < DISABLED_REPOSITORY_COUNT; option_index++)); do
+        printf '  %s\n' "${DISABLED_REPOSITORIES[${option_index}]}"
+    done
 else
-    echo "引数で無効化する一時リポジトリ: なし"
+    echo "引数で明示的に除外するリポジトリ: なし"
 fi
 
 snapshot_dnf -y --refresh makecache 2>&1 \
@@ -478,20 +597,28 @@ snapshot_dnf -q module list --enabled \
 
 echo "installrootの現在状態からRocky Linux ${TARGET_VERSION}更新RPMをダウンロードします。"
 echo "この処理ではinstallrootのパッケージを更新しません。"
-if [[ ${#EXCLUDE_PATTERNS[@]} -gt 0 ]]; then
+if [[ ${EXCLUDE_PATTERN_COUNT} -gt 0 ]]; then
     echo "引数で指定された除外パターン:"
-    printf '  %s\n' "${EXCLUDE_PATTERNS[@]}"
+    for ((option_index = 0; option_index < EXCLUDE_PATTERN_COUNT; option_index++)); do
+        printf '  %s\n' "${EXCLUDE_PATTERNS[${option_index}]}"
+    done
 else
     echo "引数で指定された除外パターン: なし"
 fi
 
-snapshot_dnf -y \
-    --refresh \
-    --best \
-    --downloadonly \
-    --destdir="${WORK_DIR}/rpms" \
-    "${DNF_EXCLUDE_ARGS[@]}" \
-    upgrade 2>&1 \
+DNF_UPGRADE_ARGS=(
+    "-y"
+    "--refresh"
+    "--best"
+    "--downloadonly"
+    "--destdir=${WORK_DIR}/rpms"
+)
+for ((option_index = 0; option_index < EXCLUDE_PATTERN_COUNT; option_index++)); do
+    DNF_UPGRADE_ARGS+=("--exclude=${EXCLUDE_PATTERNS[${option_index}]}")
+done
+DNF_UPGRADE_ARGS+=("upgrade")
+
+snapshot_dnf "${DNF_UPGRADE_ARGS[@]}" 2>&1 \
     | tee "${WORK_DIR}/state/dnf-download.log"
 
 package_list > "${WORK_DIR}/state/installed-baseline-for-apply.txt"

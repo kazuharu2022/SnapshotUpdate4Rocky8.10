@@ -186,7 +186,7 @@ sudo ./capture-rocky8.10-installroot-snapshot.sh \
 sudo rpm --root "${CHROOT}" -q kernel-core
 ```
 
-一時リポジトリを除外するには、`--disablerepo REPOID`または`--disablerepo=REPOID`を指定します。複数指定、カンマ区切り、引用符で囲んだワイルドカード指定に対応します。
+リポジトリを明示的に除外するには、`--disablerepo REPOID`または`--disablerepo=REPOID`を指定します。このオプションは必須ではありません。複数指定、カンマ区切り、引用符で囲んだワイルドカード指定に対応します。
 
 ```bash
 sudo ./capture-rocky8.10-installroot-snapshot.sh \
@@ -199,6 +199,21 @@ sudo ./capture-rocky8.10-installroot-snapshot.sh \
 - `rocky-8.10-installroot-baseos`
 - `rocky-8.10-installroot-appstream`
 - `rocky-8.10-installroot-extras`
+
+`${CHROOT}/etc/yum.repos.d/*.repo`に定義されたrepoは、取得用のRocky公式一時repoと混在しないよう常に隔離され、指定の有無にかかわらず使用されません。ただし、除外の意図を記録するため、そこに存在するrepo IDを`--disablerepo`へ指定することもできます。例えば次の定義ならrepo IDは`OpenHPC-updates`です。`name=OpenHPC-2 - Updates`は表示名であり、空白が含まれていてもrepo IDの判定には影響しません。
+
+```ini
+[OpenHPC-updates]
+name=OpenHPC-2 - Updates
+```
+
+```bash
+sudo ./capture-rocky8.10-installroot-snapshot.sh \
+  --installroot "${CHROOT}" \
+  --disablerepo OpenHPC-updates
+```
+
+指定した文字列が一時repoのIDにもinstallroot内の角括弧のrepo IDにも一致しない場合は、入力誤りとして停止します。`name=`の値は指定しないでください。
 
 パッケージ除外が必要な場合は、既存取得スクリプトと同じく`--exclude PATTERN`、`--exclude=PATTERN`、`-x PATTERN`も使用できます。指定内容はアーカイブ内の`state/requested-disabled-repositories.txt`と`state/requested-excludes.txt`に記録されます。
 
