@@ -189,7 +189,9 @@ sudo ./apply-rocky8.8-to-8.10-installroot.sh \
 
 空のTFTPディレクトリや単独の `boot/` ディレクトリには適用できません。また、安全のためホストの `/` はinstallrootとして拒否します。
 
-更新前後のOS判定では、ホスト側の `/etc/os-release` は参照しません。`chroot "${CHROOT}" /bin/cat /etc/os-release` でPXE用rootfs内の `ID=rocky` と `VERSION_ID` を読み取ります。更新前は8.8または8.10、更新後は8.10であることを確認します。
+更新前後のOS判定では、ホスト側の `/etc/os-release` は参照しません。installrootのRPM DBにある `rocky-release` を必須の判定元とし、更新前は8.8または8.10、更新後は8.10であることを確認します。あわせて `chroot "${CHROOT}" /bin/cat /etc/os-release` でPXE用rootfs内の情報を読み取り、存在する `ID` と `VERSION_ID` がRPM DBと矛盾しないことを確認します。
+
+chroot内の `/etc/os-release` に `ID` または `VERSION_ID` がない場合は警告を表示し、`rocky-release` RPMの情報で継続します。`ID=rhel`のようにRocky以外が明示されている場合や、`VERSION_ID`とRPMのバージョンが食い違う場合は安全のため停止します。
 
 内部では外部repoをすべて無効化し、次の形式で保存済みRPMだけをインストールします。
 

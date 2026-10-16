@@ -65,6 +65,9 @@ grep -Fq -- 'chroot "${INSTALLROOT}" /bin/cat /etc/os-release' "${SCRIPT}"
 grep -Fq -- 'validate_installroot_release "更新前" "${SOURCE_VERSION}" "${TARGET_VERSION}"' "${SCRIPT}"
 grep -Fq -- 'validate_installroot_release "適用後" "${TARGET_VERSION}"' "${SCRIPT}"
 grep -Fq -- 'ALLOWED_DRIFT_SCOPE="archive"' "${SCRIPT}"
+grep -Fq -- 'rpm --root "${INSTALLROOT}" -q rocky-release' "${SCRIPT}"
+grep -Fq -- 'INSTALLROOT_EFFECTIVE_VERSION="${INSTALLROOT_ROCKY_VERSION}"' "${SCRIPT}"
+grep -Fq -- 'chroot内/etc/os-releaseにIDがありません。rocky-release RPMでRocky Linuxと判定しました。' "${SCRIPT}"
 
 if grep -Fq -- 'grep -Eq' "${SCRIPT}" \
     && grep -Fq -- '"${INSTALLROOT}/etc/rocky-release"' "${SCRIPT}"; then

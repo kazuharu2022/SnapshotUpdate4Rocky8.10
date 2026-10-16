@@ -58,18 +58,31 @@ validate_installroot_release()
     shift
     local expected_version expected_versions="" version_matches=0
 
-    if ! INSTALLROOT_OS_RELEASE_CONTENT="$(
+    INSTALLROOT_OS_RELEASE_CONTENT=""
+    INSTALLROOT_OS_ID=""
+    INSTALLROOT_OS_VERSION=""
+
+    if INSTALLROOT_OS_RELEASE_CONTENT="$(
         chroot "${INSTALLROOT}" /bin/cat /etc/os-release 2>/dev/null
     )"; then
-        die "${validation_phase}のinstallroot内で/etc/os-releaseを読み込めません。完全なrootfsを指定してください。"
+        INSTALLROOT_OS_ID="$(
+            printf '%s\n' "${INSTALLROOT_OS_RELEASE_CONTENT}" | os_release_value ID
+        )"
+        INSTALLROOT_OS_VERSION="$(
+            printf '%s\n' "${INSTALLROOT_OS_RELEASE_CONTENT}" | os_release_value VERSION_ID
+        )"
+    else
+        echo "WARNING: ${validation_phase}のinstallroot内で/etc/os-releaseを読み込めません。" >&2
+        echo "WARNING: installrootのRPM DBにあるrocky-releaseで判定します。" >&2
     fi
 
-    INSTALLROOT_OS_ID="$(
-        printf '%s\n' "${INSTALLROOT_OS_RELEASE_CONTENT}" | os_release_value ID
-    )"
-    INSTALLROOT_OS_VERSION="$(
-        printf '%s\n' "${INSTALLROOT_OS_RELEASE_CONTENT}" | os_release_value VERSION_ID
-    )"
+    if ! INSTALLROOT_ROCKY_VERSION="$(
+        rpm --root "${INSTALLROOT}" -q rocky-release \
+            --qf '%{VERSION}\n' 2>/dev/null \
+            | LC_ALL=C sort -u
+    )" || [[ -z "${INSTALLROOT_ROCKY_VERSION}" ]]; then
+        die "${validation_phase}のinstallrootのRPM DBでrocky-releaseを確認できません。完全なRocky Linux rootfsを指定してください。"
+    fi
 
     for expected_version in "$@"; do
         if [[ -n "${expected_versions}" ]]; then
@@ -77,18 +90,40 @@ validate_installroot_release()
         fi
         expected_versions+="${expected_version}"
 
-        if [[ "${INSTALLROOT_OS_VERSION}" == "${expected_version}" ]]; then
+        if [[ "${INSTALLROOT_ROCKY_VERSION}" == "${expected_version}" ]]; then
             version_matches=1
         fi
     done
 
-    if [[ "${INSTALLROOT_OS_ID}" != "rocky" ]] \
-        || [[ "${version_matches}" -ne 1 ]]; then
+    if [[ "${version_matches}" -ne 1 ]]; then
         echo "ERROR: ${validation_phase}のinstallrootがRocky Linux ${expected_versions}ではありません。" >&2
-        echo "chroot内/etc/os-release: ID=${INSTALLROOT_OS_ID:-未設定} VERSION_ID=${INSTALLROOT_OS_VERSION:-未設定}" >&2
-        printf '%s\n' "${INSTALLROOT_OS_RELEASE_CONTENT}" >&2
+        echo "installroot内rocky-release RPM: VERSION=${INSTALLROOT_ROCKY_VERSION}" >&2
         return 1
     fi
+
+    if [[ -n "${INSTALLROOT_OS_ID}" && "${INSTALLROOT_OS_ID}" != "rocky" ]]; then
+        echo "ERROR: ${validation_phase}のinstallroot内/etc/os-releaseがRocky Linuxではありません。" >&2
+        echo "chroot内/etc/os-release: ID=${INSTALLROOT_OS_ID} VERSION_ID=${INSTALLROOT_OS_VERSION:-未設定}" >&2
+        return 1
+    fi
+
+    if [[ -n "${INSTALLROOT_OS_VERSION}" ]] \
+        && [[ "${INSTALLROOT_OS_VERSION}" != "${INSTALLROOT_ROCKY_VERSION}" ]]; then
+        echo "ERROR: ${validation_phase}のinstallroot内でOSバージョン情報が一致しません。" >&2
+        echo "chroot内/etc/os-release: VERSION_ID=${INSTALLROOT_OS_VERSION}" >&2
+        echo "installroot内rocky-release RPM: VERSION=${INSTALLROOT_ROCKY_VERSION}" >&2
+        return 1
+    fi
+
+    if [[ -z "${INSTALLROOT_OS_ID}" ]]; then
+        echo "WARNING: chroot内/etc/os-releaseにIDがありません。rocky-release RPMでRocky Linuxと判定しました。" >&2
+    fi
+
+    if [[ -z "${INSTALLROOT_OS_VERSION}" ]]; then
+        echo "WARNING: chroot内/etc/os-releaseにVERSION_IDがありません。rocky-release RPMのVERSION=${INSTALLROOT_ROCKY_VERSION}を使用します。" >&2
+    fi
+
+    INSTALLROOT_EFFECTIVE_VERSION="${INSTALLROOT_ROCKY_VERSION}"
 }
 
 signature_log_has_failure()
@@ -303,21 +338,10 @@ fi
 INSTALLROOT_OS_RELEASE_CONTENT=""
 INSTALLROOT_OS_ID=""
 INSTALLROOT_OS_VERSION=""
+INSTALLROOT_ROCKY_VERSION=""
+INSTALLROOT_EFFECTIVE_VERSION=""
 validate_installroot_release "更新前" "${SOURCE_VERSION}" "${TARGET_VERSION}"
-INSTALLROOT_INITIAL_VERSION="${INSTALLROOT_OS_VERSION}"
-
-if ! rpm --root "${INSTALLROOT}" -q rocky-release >/dev/null 2>&1; then
-    die "installrootのRPM DBでrocky-releaseを確認できません。完全なrootfsを指定してください。"
-fi
-
-INSTALLROOT_ROCKY_VERSION="$(
-    rpm --root "${INSTALLROOT}" -q rocky-release \
-        --qf '%{VERSION}\n' 2>/dev/null \
-        | LC_ALL=C sort -u
-)"
-if [[ "${INSTALLROOT_ROCKY_VERSION}" != "${INSTALLROOT_INITIAL_VERSION}" ]]; then
-    die "installroot内の/etc/os-releaseとrocky-release RPMのバージョンが一致しません: os-release=${INSTALLROOT_INITIAL_VERSION} RPM=${INSTALLROOT_ROCKY_VERSION}"
-fi
+INSTALLROOT_INITIAL_VERSION="${INSTALLROOT_EFFECTIVE_VERSION}"
 
 if ! LC_ALL=C rpm --querytags | grep -Fqx 'SHA1HEADER'; then
     die "RPMの不変ヘッダーID（SHA1HEADER）を取得できません。"
@@ -712,7 +736,12 @@ fi
 
 echo
 echo "installrootのリリース:"
-printf '%s\n' "${INSTALLROOT_OS_RELEASE_CONTENT}"
+if [[ -n "${INSTALLROOT_OS_RELEASE_CONTENT}" ]]; then
+    printf '%s\n' "${INSTALLROOT_OS_RELEASE_CONTENT}"
+else
+    echo "/etc/os-release: 読み取り不可"
+fi
+echo "rocky-release RPM VERSION=${INSTALLROOT_ROCKY_VERSION}"
 
 echo
 echo "installrootのkernel-core:"
