@@ -299,21 +299,25 @@ DNF_CONFIG="${WORK_DIR}/dnf.conf"
 SNAPSHOT_GPG_KEY="${WORK_DIR}/RPM-GPG-KEY-rockyofficial"
 INSTALLROOT_REPOSITORY_IDS="${WORK_DIR}/state/installroot-repository-ids.txt"
 CACHE_RELATIVE="/var/cache/dnf/.${SNAPSHOT_NAME}.capture.$$"
-LOG_RELATIVE="/var/log/.${SNAPSHOT_NAME}.capture.$$"
-CACHE_HOST_PATH="${INSTALLROOT}${CACHE_RELATIVE}"
-LOG_HOST_PATH="${INSTALLROOT}${LOG_RELATIVE}"
+CACHE_INSTALLROOT_PATH="${INSTALLROOT}${CACHE_RELATIVE}"
+LOG_HOST_PATH="$(mktemp -d "/tmp/.${SNAPSHOT_NAME}.dnf-logs.XXXXXX")"
+LOG_INSTALLROOT_PATH="${INSTALLROOT}${LOG_HOST_PATH}"
 
-if [[ -e "${CACHE_HOST_PATH}" || -L "${CACHE_HOST_PATH}" \
-    || -e "${LOG_HOST_PATH}" || -L "${LOG_HOST_PATH}" ]]; then
-    die "installroot内の一時DNFパスが既に存在します。再実行してください。"
+if [[ -e "${CACHE_INSTALLROOT_PATH}" || -L "${CACHE_INSTALLROOT_PATH}" \
+    || -e "${LOG_INSTALLROOT_PATH}" || -L "${LOG_INSTALLROOT_PATH}" ]]; then
+    rm -rf -- "${LOG_HOST_PATH}" "${WORK_DIR}"
+    die "DNF用の一時パスが既に存在します。再実行してください。"
 fi
 
 cleanup()
 {
     local exit_status=$?
 
-    if [[ -n "${CACHE_HOST_PATH:-}" ]]; then
-        rm -rf -- "${CACHE_HOST_PATH}"
+    if [[ -n "${CACHE_INSTALLROOT_PATH:-}" ]]; then
+        rm -rf -- "${CACHE_INSTALLROOT_PATH}"
+    fi
+    if [[ -n "${LOG_INSTALLROOT_PATH:-}" ]]; then
+        rm -rf -- "${LOG_INSTALLROOT_PATH}"
     fi
     if [[ -n "${LOG_HOST_PATH:-}" ]]; then
         rm -rf -- "${LOG_HOST_PATH}"
@@ -329,9 +333,12 @@ cleanup()
 }
 trap cleanup EXIT
 
-# DNFはlogdirを自動作成しないため、installroot内に専用の一時ディレクトリを
-# 先に作成する。終了時はcleanupでキャッシュとともに削除する。
-mkdir -p -- "${CACHE_HOST_PATH}" "${LOG_HOST_PATH}"
+# DNF 4/libdnfの版によってlogdirがinstallroot基準またはホスト基準で解釈される
+# 場合がある。安全に作成したホストの一時ディレクトリと、installroot基準の
+# 対応パスを使用する。
+mkdir -p -- \
+    "${CACHE_INSTALLROOT_PATH}" \
+    "${LOG_INSTALLROOT_PATH}"
 
 mkdir -p \
     "${WORK_DIR}/rpms" \
@@ -459,6 +466,7 @@ plugins=False
 best=True
 skip_if_unavailable=False
 keepcache=True
+logfilelevel=0
 DNF_CONFIG_EOF
 
 cat > "${REPO_DIR}/Rocky-8.10-Installroot.repo" <<REPO_EOF
@@ -500,7 +508,7 @@ DNF_ARGS=(
     "--config=${DNF_CONFIG}"
     "--setopt=reposdir=${REPO_DIR}"
     "--setopt=cachedir=${CACHE_RELATIVE}"
-    "--setopt=logdir=${LOG_RELATIVE}"
+    "--setopt=logdir=${LOG_HOST_PATH}"
     "--setopt=timeout=300"
     "--setopt=minrate=1"
     "--setopt=retries=20"
@@ -560,7 +568,8 @@ printf '%s\n' \
     "config=${DNF_CONFIG}" \
     "reposdir=${REPO_DIR}" \
     "cachedir=${CACHE_RELATIVE}" \
-    "logdir=${LOG_RELATIVE}" \
+    "logdir=${LOG_HOST_PATH}" \
+    "logfilelevel=0" \
     "disablerepo=*" \
     "installroot_repositories=not-loaded" \
     > "${WORK_DIR}/state/dnf-repository-isolation.txt"
@@ -719,7 +728,11 @@ awk -F '\t' '$1 ~ /^kernel($|-)/ {print}' \
     "${WORK_DIR}/state/rpm-manifest.txt" \
     > "${WORK_DIR}/state/kernel-rpms.txt"
 
-rm -rf -- "${CACHE_HOST_PATH}" "${LOG_HOST_PATH}" "${SIGNATURE_DB}"
+rm -rf -- \
+    "${CACHE_INSTALLROOT_PATH}" \
+    "${LOG_INSTALLROOT_PATH}" \
+    "${LOG_HOST_PATH}" \
+    "${SIGNATURE_DB}"
 
 mv "${WORK_DIR}" "${FINAL_DIR}"
 WORK_DIR=""
