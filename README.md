@@ -10,7 +10,8 @@ Rocky Linux 8.8またはRed Hat Enterprise Linux（RHEL）8.8で、8.10への更
 | --- | --- |
 | `capture-rocky8.8-to-8.10-snapshot.sh` | Rocky Linux 8.8から8.10へ更新するRPMを取得 |
 | `apply-rocky8.8-to-8.10-snapshot.sh` | 上記スナップショットを検証し、Rocky Linux 8.8へオフライン適用 |
-| `apply-rocky8.8-to-8.10-installroot.sh` | RockyスナップショットをPXE用Rocky 8.8 rootfsへ `dnf --installroot` で適用 |
+| `capture-rocky8.10-installroot-snapshot.sh` | PXE用Rocky 8.10 rootfsのRPM DBを基準に更新RPMを取得 |
+| `apply-rocky8.8-to-8.10-installroot.sh` | RockyスナップショットをPXE用Rocky 8.8/8.10 rootfsへ `dnf --installroot` で適用 |
 | `capture-rhel8.8-to-8.10-snapshot.sh` | RHEL 8.8から8.10へ更新するRPMを構成済みrepoから取得 |
 | `apply-rhel8.8-to-8.10-snapshot.sh` | RHEL専用スナップショットを検証し、RHEL 8.8へオフライン適用 |
 | `capture-rocky8.8-vault-snapshot.sh` | Rocky Linux 8.8 Vaultの最終状態までの更新RPMを取得。8.10には更新しない |
@@ -21,7 +22,7 @@ Rocky用とRHEL用のスナップショットには互換性がありません�
 
 ## 事前確認
 
-取得元・適用先はいずれも、実行開始時点で対象ディストリビューションの8.8である必要があります。
+8.8→8.10用の取得元・適用先は、実行開始時点で対象ディストリビューションの8.8である必要があります。PXE用installroot専用取得スクリプトだけは、指定rootfsがRocky Linux 8.10であることを前提とします。
 
 ```bash
 # Rocky Linux
@@ -47,6 +48,7 @@ RHEL上では `/etc/os-release` の `ID=rhel` と `VERSION_ID=8.8` も確認さ�
 chmod +x \
   capture-rocky8.8-to-8.10-snapshot.sh \
   capture-rocky8.8-vault-snapshot.sh \
+  capture-rocky8.10-installroot-snapshot.sh \
   apply-rocky8.8-to-8.10-snapshot.sh \
   apply-rocky8.8-to-8.10-installroot.sh \
   capture-rhel8.8-to-8.10-snapshot.sh \
@@ -167,6 +169,48 @@ sudo ./apply-rocky8.8-to-8.10-snapshot.sh \
 
 検証後に更新内容が表示され、実際に適用する前に確認を求めます。8.8から8.10へのスナップショットには、旧 `apply-rocky8-snapshot-update.sh` を使用しないでください。
 
+### PXE用Rocky 8.10 rootfsを基準に更新RPMを取得する
+
+PXE用rootfsが既にRocky Linux 8.10の場合は、ホスト側のRPM DBではなく対象rootfsのRPM DBを基準にするinstallroot専用取得スクリプトを使用します。取得処理はrootfsのパッケージを更新しません。
+
+```bash
+CHROOT=/srv/pxe/rocky8-rootfs
+
+sudo ./capture-rocky8.10-installroot-snapshot.sh \
+  --installroot "${CHROOT}"
+```
+
+対象は完全なRocky Linux 8.10 rootfsで、`rocky-release` RPMと `.el8_10` を含む `kernel-core` が必要です。カーネル版は固定文字列では判定せず、rootfsのRPM DBから実際の版を取得してスナップショット内に記録します。例えば前提のカーネルが `4.18.0-553.12.1.el8_10` なら、事前に次のように確認できます。
+
+```bash
+sudo rpm --root "${CHROOT}" -q kernel-core
+```
+
+一時リポジトリを除外するには、`--disablerepo REPOID`または`--disablerepo=REPOID`を指定します。複数指定、カンマ区切り、引用符で囲んだワイルドカード指定に対応します。
+
+```bash
+sudo ./capture-rocky8.10-installroot-snapshot.sh \
+  --installroot "${CHROOT}" \
+  --disablerepo rocky-8.10-installroot-extras
+```
+
+指定可能な一時リポジトリIDは次のとおりです。
+
+- `rocky-8.10-installroot-baseos`
+- `rocky-8.10-installroot-appstream`
+- `rocky-8.10-installroot-extras`
+
+パッケージ除外が必要な場合は、既存取得スクリプトと同じく`--exclude PATTERN`、`--exclude=PATTERN`、`-x PATTERN`も使用できます。指定内容はアーカイブ内の`state/requested-disabled-repositories.txt`と`state/requested-excludes.txt`に記録されます。
+
+生成物は次の2ファイルです。
+
+```text
+/var/lib/rocky-update-snapshots/rocky8.10-installroot-update-YYYYMMDDTHHMMSS+0900.tar
+/var/lib/rocky-update-snapshots/rocky8.10-installroot-update-YYYYMMDDTHHMMSS+0900.tar.sha256
+```
+
+更新RPMが1件もない場合は、空のスナップショットを作らず終了します。取得元rootfsのパッケージ構成は`installed-baseline-for-apply.txt`に保存されるため、ホスト側で取得したスナップショットを流用した場合のような無関係な差分は発生しません。DNFがRocky公式GPG鍵をRPM DBへ初回登録する場合を除き、`downloadonly`処理の前後でrootfsのRPM構成が変化していないことも検証します。
+
 ### PXE用rootfsへ `dnf --installroot` で適用する
 
 稼働中ホストではなく、PXEブート用のRocky Linux rootfsを更新する場合は、installroot専用スクリプトを使用します。
@@ -177,6 +221,14 @@ CHROOT=/srv/pxe/rocky8-rootfs
 sudo ./apply-rocky8.8-to-8.10-installroot.sh \
   --installroot "${CHROOT}" \
   /var/lib/rocky-update-snapshots/rocky8.8-to-8.10-update-YYYYMMDDTHHMMSS+0900.tar
+```
+
+PXE用Rocky 8.10 rootfsを基準に取得した場合は、同じ適用スクリプトへ`rocky8.10-installroot-update-*.tar`を渡します。
+
+```bash
+sudo ./apply-rocky8.8-to-8.10-installroot.sh \
+  --installroot "${CHROOT}" \
+  /var/lib/rocky-update-snapshots/rocky8.10-installroot-update-YYYYMMDDTHHMMSS+0900.tar
 ```
 
 `CHROOT`には絶対パスを指定します。対象は、次を含む完全なRocky Linux 8.8または8.10 rootfsである必要があります。

@@ -86,3 +86,6 @@ run_cases \
 run_cases \
     "${REPO_ROOT}/capture-rhel8.8-to-8.10-snapshot.sh" \
     "capture-rhel"
+run_cases \
+    "${REPO_ROOT}/capture-rocky8.10-installroot-snapshot.sh" \
+    "capture-rocky-installroot"

@@ -4,7 +4,9 @@ umask 077
 
 readonly SOURCE_VERSION="8.8"
 readonly TARGET_VERSION="8.10"
-readonly ARCHIVE_PREFIX="rocky8.8-to-8.10-update-"
+readonly UPGRADE_ARCHIVE_PREFIX="rocky8.8-to-8.10-update-"
+readonly INSTALLROOT_ARCHIVE_PREFIX="rocky8.10-installroot-update-"
+readonly ROCKY_GPG_KEY="/etc/pki/rpm-gpg/RPM-GPG-KEY-rockyofficial"
 
 usage()
 {
@@ -12,16 +14,17 @@ usage()
 使用方法:
   sudo ./apply-rocky8.8-to-8.10-installroot.sh \
     --installroot /absolute/path/to/rocky8-rootfs \
-    /path/to/rocky8.8-to-8.10-update-YYYYMMDDTHHMMSS+0900.tar
+    /path/to/SNAPSHOT.tar
 
 オプション:
-      --installroot PATH   更新対象のRocky Linux 8.8 rootfs
+      --installroot PATH   更新対象のRocky Linux 8.8または8.10 rootfs
       --installroot=PATH   同上
   -h, --help               このヘルプを表示する
 
 注意:
   PATHは/etc、RPM DB、/bootを含む完全なrootfsである必要があります。
   空のTFTPディレクトリやホストの / は指定できません。
+  8.8→8.10更新用と8.10 installroot更新用の両方のアーカイブに対応します。
 USAGE_EOF
 }
 
@@ -335,6 +338,15 @@ if [[ -z "${INSTALLROOT}" || "${INSTALLROOT}" == "/" ]]; then
     die "ホストの / はinstallrootとして指定できません。"
 fi
 
+INSTALLROOT_GPG_KEY_PATH="${INSTALLROOT}${ROCKY_GPG_KEY}"
+INSTALLROOT_GPG_KEY="$(readlink -f -- "${INSTALLROOT_GPG_KEY_PATH}" 2>/dev/null || true)"
+if [[ -z "${INSTALLROOT_GPG_KEY}" ]] \
+    || [[ "${INSTALLROOT_GPG_KEY}" != "${INSTALLROOT}/"* ]] \
+    || [[ ! -f "${INSTALLROOT_GPG_KEY}" ]] \
+    || [[ ! -r "${INSTALLROOT_GPG_KEY}" ]]; then
+    die "installroot内のRocky Linux公式GPG鍵を安全に読み込めません: ${INSTALLROOT_GPG_KEY_PATH}"
+fi
+
 INSTALLROOT_OS_RELEASE_CONTENT=""
 INSTALLROOT_OS_ID=""
 INSTALLROOT_OS_VERSION=""
@@ -355,9 +367,21 @@ ARCHIVE="$(readlink -f -- "${ARCHIVE_INPUT}")"
 ARCHIVE_NAME="${ARCHIVE##*/}"
 CHECKSUM_FILE="${ARCHIVE}.sha256"
 
-if [[ "${ARCHIVE_NAME}" != "${ARCHIVE_PREFIX}"*.tar ]]; then
-    die "Rocky Linux 8.8から8.10への専用アーカイブ名ではありません: ${ARCHIVE_NAME}"
-fi
+case "${ARCHIVE_NAME}" in
+    "${UPGRADE_ARCHIVE_PREFIX}"*.tar)
+        SNAPSHOT_KIND="upgrade-8.8-to-8.10"
+        WORKFLOW_DESCRIPTION="Rocky Linux 8.8から8.10へのinstallroot更新"
+        LOG_WORKFLOW="rocky8.8-to-8.10-installroot"
+        ;;
+    "${INSTALLROOT_ARCHIVE_PREFIX}"*.tar)
+        SNAPSHOT_KIND="installroot-8.10-update"
+        WORKFLOW_DESCRIPTION="Rocky Linux 8.10 installrootの更新"
+        LOG_WORKFLOW="rocky8.10-installroot-update"
+        ;;
+    *)
+        die "対応していないRocky Linux installroot用アーカイブ名です: ${ARCHIVE_NAME}"
+        ;;
+esac
 
 if [[ ! -f "${CHECKSUM_FILE}" ]]; then
     die "チェックサムファイルが見つかりません: ${CHECKSUM_FILE}"
@@ -427,7 +451,7 @@ for member in "${ARCHIVE_MEMBERS[@]}"; do
     esac
 done
 
-APPLY_ROOT="$(mktemp -d /var/tmp/rocky8.8-to-8.10-installroot.XXXXXX)"
+APPLY_ROOT="$(mktemp -d /var/tmp/rocky-installroot-apply.XXXXXX)"
 trap 'rm -rf -- "${APPLY_ROOT}"' EXIT
 
 tar --no-same-owner --no-same-permissions \
@@ -449,30 +473,50 @@ if [[ -n "${UNSAFE_ENTRY}" ]]; then
     die "アーカイブに許可されない種類のエントリがあります: ${UNSAFE_ENTRY}"
 fi
 
-REQUIRED_STATE_FILES=(
+REQUIRED_NONEMPTY_STATE_FILES=(
     "snapshot-contract.txt"
     "SHA256SUMS"
     "rpm-count.txt"
     "rpm-manifest.txt"
     "installed-baseline-for-apply.txt"
-    "target-kernel-core-rpms.txt"
-    "target-rocky-release-rpms.txt"
 )
 
-for state_file in "${REQUIRED_STATE_FILES[@]}"; do
+for state_file in "${REQUIRED_NONEMPTY_STATE_FILES[@]}"; do
     if [[ ! -s "${STATE_DIR}/${state_file}" ]]; then
         die "必須のstateファイルがないか空です: ${state_file}"
     fi
 done
 
-EXPECTED_CONTRACT="$(printf '%s\n' \
-    'snapshot_format=1' \
-    "source_version=${SOURCE_VERSION}" \
-    "target_version=${TARGET_VERSION}")"
+for state_file in target-kernel-core-rpms.txt target-rocky-release-rpms.txt; do
+    if [[ ! -f "${STATE_DIR}/${state_file}" ]] || [[ -L "${STATE_DIR}/${state_file}" ]]; then
+        die "必須のstateファイルがありません: ${state_file}"
+    fi
+done
+
+if [[ "${SNAPSHOT_KIND}" == "upgrade-8.8-to-8.10" ]]; then
+    EXPECTED_CONTRACT="$(printf '%s\n' \
+        'snapshot_format=1' \
+        "source_version=${SOURCE_VERSION}" \
+        "target_version=${TARGET_VERSION}")"
+else
+    EXPECTED_CONTRACT="$(printf '%s\n' \
+        'snapshot_format=2' \
+        'snapshot_kind=rocky-installroot-update' \
+        "source_version=${TARGET_VERSION}" \
+        "target_version=${TARGET_VERSION}")"
+
+    if [[ ! -s "${STATE_DIR}/boot-kernel-core-rpms.txt" ]]; then
+        die "8.10 installroot更新スナップショットにboot-kernel-core-rpms.txtがないか空です。"
+    fi
+
+    if [[ "${INSTALLROOT_INITIAL_VERSION}" != "${TARGET_VERSION}" ]]; then
+        die "8.10 installroot更新スナップショットはRocky Linux ${TARGET_VERSION}のrootfs専用です。"
+    fi
+fi
 ACTUAL_CONTRACT="$(< "${STATE_DIR}/snapshot-contract.txt")"
 
 if [[ "${ACTUAL_CONTRACT}" != "${EXPECTED_CONTRACT}" ]]; then
-    die "スナップショット契約がRocky Linux 8.8→8.10専用形式と一致しません。"
+    die "スナップショット契約がアーカイブ種別と一致しません。"
 fi
 
 mapfile -t RPM_SUM_LINES < <(
@@ -553,11 +597,38 @@ awk -F '\t' \
     "${ACTUAL_MANIFEST}" \
     > "${VERIFIED_TARGET_RELEASE}"
 
-if [[ ! -s "${VERIFIED_TARGET_KERNELS}" ]] \
-    || [[ ! -s "${VERIFIED_TARGET_RELEASE}" ]] \
-    || ! cmp -s "${STATE_DIR}/target-kernel-core-rpms.txt" "${VERIFIED_TARGET_KERNELS}" \
+if ! cmp -s "${STATE_DIR}/target-kernel-core-rpms.txt" "${VERIFIED_TARGET_KERNELS}" \
     || ! cmp -s "${STATE_DIR}/target-rocky-release-rpms.txt" "${VERIFIED_TARGET_RELEASE}"; then
     die "Rocky Linux 8.10用kernel-coreまたはrocky-releaseの検証に失敗しました。"
+fi
+
+if [[ "${SNAPSHOT_KIND}" == "upgrade-8.8-to-8.10" ]]; then
+    if [[ ! -s "${VERIFIED_TARGET_KERNELS}" ]] \
+        || [[ ! -s "${VERIFIED_TARGET_RELEASE}" ]]; then
+        die "8.8→8.10更新用kernel-coreまたはrocky-releaseがスナップショットに含まれていません。"
+    fi
+    REQUIRED_BOOT_KERNELS="${VERIFIED_TARGET_KERNELS}"
+else
+    REQUIRED_BOOT_KERNELS="${STATE_DIR}/boot-kernel-core-rpms.txt"
+
+    if ! awk -F '\t' \
+        'NF != 3 || $1 != "kernel-core" || $2 !~ /[.]el8_10([.]|$)/ {invalid = 1} END {exit invalid}' \
+        "${REQUIRED_BOOT_KERNELS}"; then
+        die "boot-kernel-core-rpms.txtにRocky Linux 8.10以外の記録があります。"
+    fi
+
+    AVAILABLE_BOOT_KERNELS="${APPLY_ROOT}/available-boot-kernel-core-rpms.txt"
+    {
+        awk -F '\t' '$1 == "kernel-core" {print}' \
+            "${STATE_DIR}/installed-baseline-for-apply.txt"
+        cat "${VERIFIED_TARGET_KERNELS}"
+    } | LC_ALL=C sort -u > "${AVAILABLE_BOOT_KERNELS}"
+
+    while IFS= read -r boot_kernel; do
+        if ! grep -Fqx -- "${boot_kernel}" "${AVAILABLE_BOOT_KERNELS}"; then
+            die "PXE確認対象kernel-coreがベースラインまたは保存済みRPMにありません: ${boot_kernel}"
+        fi
+    done < "${REQUIRED_BOOT_KERNELS}"
 fi
 
 RUN_ID="$(date +%Y%m%dT%H%M%S)"
@@ -567,7 +638,7 @@ if [[ -L "${INSTALLROOT}/var" || -L "${INSTALLROOT}/var/log" ]]; then
 fi
 mkdir -p "${INSTALLROOT}/var/log"
 
-LOG_PREFIX="${INSTALLROOT}/var/log/rocky8.8-to-8.10-installroot-${RUN_ID}"
+LOG_PREFIX="${INSTALLROOT}/var/log/${LOG_WORKFLOW}-${RUN_ID}"
 SIGNATURE_LOG="${LOG_PREFIX}-rpm-signatures.log"
 PREFLIGHT_LOG="${LOG_PREFIX}-preflight.log"
 APPLY_LOG="${LOG_PREFIX}-update.log"
@@ -575,7 +646,12 @@ DIFF_LOG="${LOG_PREFIX}-package-drift.diff"
 BOOT_LOG="${LOG_PREFIX}-boot-artifacts.log"
 
 echo "RPM署名を確認します。"
-if ! LC_ALL=C rpm --checksig "${RPM_FILES[@]}" \
+SIGNATURE_DB="${APPLY_ROOT}/signature-rpmdb"
+mkdir -p "${SIGNATURE_DB}"
+rpm --dbpath "${SIGNATURE_DB}" --initdb
+rpm --dbpath "${SIGNATURE_DB}" --import "${INSTALLROOT_GPG_KEY}"
+
+if ! LC_ALL=C rpm --dbpath "${SIGNATURE_DB}" --checksig "${RPM_FILES[@]}" \
     > "${SIGNATURE_LOG}" 2>&1; then
     sed -n '1,200p' "${SIGNATURE_LOG}"
     die "RPM署名の検証コマンドが失敗しました。"
@@ -673,7 +749,7 @@ dnf "${DNF_ARGS[@]}" \
 
 echo
 echo "事前検証はPASSしました。"
-echo "次のDNF確認でinstallrootへ実際の8.8→8.10更新を実行します。"
+echo "次のDNF確認で${WORKFLOW_DESCRIPTION}を実行します。"
 echo
 
 dnf "${DNF_ARGS[@]}" \
@@ -711,6 +787,11 @@ done < "${VERIFIED_TARGET_RELEASE}"
 BOOT_ARTIFACT_MISSING=0
 
 while IFS=$'\t' read -r package_name package_evr package_arch; do
+    if ! grep -Fqx -- "${package_name}"$'\t'"${package_evr}"$'\t'"${package_arch}" \
+        "${INSTALLED_AFTER}"; then
+        die "適用後のinstallrootにPXE確認対象kernel-coreがありません: ${package_name} ${package_evr} ${package_arch}"
+    fi
+
     kernel_version_release="${package_evr#*:}"
     kernel_path="${INSTALLROOT}/boot/vmlinuz-${kernel_version_release}.${package_arch}"
     initramfs_path="${INSTALLROOT}/boot/initramfs-${kernel_version_release}.${package_arch}.img"
@@ -728,7 +809,7 @@ while IFS=$'\t' read -r package_name package_evr package_arch; do
         echo "ERROR: PXE用initramfsが生成されていません: ${initramfs_path}" >&2
         BOOT_ARTIFACT_MISSING=1
     fi
-done < "${VERIFIED_TARGET_KERNELS}"
+done < "${REQUIRED_BOOT_KERNELS}"
 
 if [[ "${BOOT_ARTIFACT_MISSING}" -ne 0 ]]; then
     die "installrootの更新は完了しましたが、PXEブート成果物が不足しています。dracut/kernel-installのログとrootfs構成を確認してください。"
@@ -748,7 +829,7 @@ echo "installrootのkernel-core:"
 rpm --root "${INSTALLROOT}" -q kernel-core --last
 
 echo
-echo "Rocky Linux 8.8から8.10へのinstallroot適用が完了しました。"
+echo "${WORKFLOW_DESCRIPTION}が完了しました。"
 echo "installroot: ${INSTALLROOT}"
 echo "署名ログ: ${SIGNATURE_LOG}"
 echo "事前検証ログ: ${PREFLIGHT_LOG}"
