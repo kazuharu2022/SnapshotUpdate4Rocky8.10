@@ -67,6 +67,7 @@ grep -Eq 'rootで実行してください|installrootディレクトリが見つ
 grep -Fq -- '"--installroot=${INSTALLROOT}"' "${SCRIPT}"
 grep -Fq -- '"--releasever=${TARGET_VERSION}"' "${SCRIPT}"
 grep -Fq -- '"--setopt=reposdir=${REPO_DIR}"' "${SCRIPT}"
+grep -Fq -- 'mkdir -p -- "${CACHE_HOST_PATH}" "${LOG_HOST_PATH}"' "${SCRIPT}"
 grep -Fq -- 'INSTALLROOT_REPOSITORY_IDS=' "${SCRIPT}"
 grep -Fq -- 'repository_pattern_is_known' "${SCRIPT}"
 grep -Fq -- '"installroot_repositories=not-loaded"' "${SCRIPT}"

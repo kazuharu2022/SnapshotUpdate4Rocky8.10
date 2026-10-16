@@ -226,6 +226,8 @@ sudo ./capture-rocky8.10-installroot-snapshot.sh \
 
 更新RPMが1件もない場合は、空のスナップショットを作らず終了します。取得元rootfsのパッケージ構成は`installed-baseline-for-apply.txt`に保存されるため、ホスト側で取得したスナップショットを流用した場合のような無関係な差分は発生しません。DNFがRocky公式GPG鍵をRPM DBへ初回登録する場合を除き、`downloadonly`処理の前後でrootfsのRPM構成が変化していないことも検証します。
 
+DNF用の一時キャッシュとログディレクトリは`${CHROOT}/var/cache/dnf`と`${CHROOT}/var/log`の配下に作成し、成功・失敗のどちらでも終了時に削除します。`Failed to open log file`を防ぐため、DNF実行前に一時ログディレクトリを作成します。
+
 ### PXE用rootfsへ `dnf --installroot` で適用する
 
 稼働中ホストではなく、PXEブート用のRocky Linux rootfsを更新する場合は、installroot専用スクリプトを使用します。

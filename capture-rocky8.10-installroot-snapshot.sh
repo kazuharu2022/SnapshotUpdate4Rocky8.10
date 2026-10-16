@@ -329,6 +329,10 @@ cleanup()
 }
 trap cleanup EXIT
 
+# DNFはlogdirを自動作成しないため、installroot内に専用の一時ディレクトリを
+# 先に作成する。終了時はcleanupでキャッシュとともに削除する。
+mkdir -p -- "${CACHE_HOST_PATH}" "${LOG_HOST_PATH}"
+
 mkdir -p \
     "${WORK_DIR}/rpms" \
     "${WORK_DIR}/state" \
